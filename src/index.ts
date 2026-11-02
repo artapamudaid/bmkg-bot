@@ -268,9 +268,24 @@ const handleMessage = async (message: TelegramBot.Message): Promise<void> => {
         const location = await reverseGeocodeDetailed(latitude, longitude);
         const adm4Code = await resolveAdm4Code(location);
         dbManager.setUserLocation(chatId, location.city, adm4Code);
+        let forecast: string;
+        try {
+          forecast = await fetchPrakiraanCuacaHariIni(adm4Code);
+        } catch (error) {
+          console.error(
+            `Lokasi berhasil diperbarui, tetapi prakiraan BMKG gagal diambil (${adm4Code}):`,
+            error,
+          );
+          await bot.sendMessage(
+            chatId,
+            `Lokasi diperbarui: ${location.village}, ${location.district}, ${location.city}.\nPrakiraan BMKG belum dapat diambil. Coba lagi dengan /cuaca.`,
+          );
+          return;
+        }
+
         await bot.sendMessage(
           chatId,
-          `Lokasi aktif berhasil diperbarui: ${location.village}, ${location.district}, ${location.city}.`,
+          `${location.village}, ${location.district}, ${location.city}\n\n${forecast}`,
         );
       });
       return;
