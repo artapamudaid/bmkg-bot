@@ -2,14 +2,17 @@
 
 Telegram bot cuaca lokal berbasis Bun, ElysiaJS, dan TypeScript. Bot mengambil alert BMKG untuk lokasi aktif pengguna, menjawab pertanyaan dengan Gemini atau provider OpenAI-compatible, menyediakan info gempa terkini, dan dapat mengirim notifikasi alert Kediri terjadwal.
 
-## Fitur
+## Fitur utama
 
 - Menerima lokasi Telegram dan mengubah koordinat menjadi nama kota/kabupaten melalui OpenStreetMap Nominatim.
 - Menyimpan lokasi pengguna di SQLite (`data.sqlite`) menggunakan `bun:sqlite`.
-- Mengambil alert nowcast BMKG berdasarkan wilayah.
+- Mengambil alert nowcast dan prakiraan cuaca BMKG per 3 jam berdasarkan desa/kelurahan.
 - Menjawab pertanyaan cuaca dengan Gemini atau API OpenAI-compatible (misalnya Sumopod dan OpenRouter).
 - Mengirim informasi gempa terkini dari BMKG.
 - Mengirim alert baru untuk Kediri ke chat notifikasi dengan cron.
+- Memetakan lokasi GPS sampai desa/kelurahan (kode ADM4), menyimpan kode tersebut, lalu mengambil prakiraan BMKG hari ini per 3 jam.
+- Menampilkan indikator “sedang mengetik” saat memproses permintaan yang memerlukan waktu.
+- Mendaftarkan command Telegram ke menu bot saat aplikasi mulai.
 - Menyediakan endpoint HTTP `/` dan `/health` melalui Elysia.
 
 ## Persyaratan
@@ -20,6 +23,7 @@ Telegram bot cuaca lokal berbasis Bun, ElysiaJS, dan TypeScript. Bot mengambil a
   - Gemini API key; atau
   - API key, base URL, dan model untuk provider OpenAI-compatible.
 - `TELEGRAM_NOTIF_CHAT_ID` untuk mengaktifkan notifier cron. Pastikan bot dapat mengirim pesan ke chat tersebut.
+- Saat lokasi dibagikan, reverse geocoding OpenStreetMap Nominatim dan direktori wilayah `wilayah.id` digunakan untuk menentukan kode ADM4 yang dibutuhkan API prakiraan BMKG.
 
 ## Instalasi lokal
 
@@ -42,11 +46,13 @@ Jangan commit `.env` atau membagikan token/API key. File `.env` sudah termasuk d
 
 ### Konfigurasi environment
 
+Atur environment sesuai provider AI yang dipilih. `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_NOTIF_CHAT_ID` wajib untuk menjalankan aplikasi saat ini; token AI wajib sesuai provider yang dipilih.
+
 | Variabel | Wajib | Keterangan |
 |---|---|---|
-| `PORT` | Tidak | Port HTTP Elysia. Default `3000`. |
+| `PORT` | Tidak | Port HTTP Elysia. Default `3000`; ubah jika port tersebut sudah dipakai. |
 | `TELEGRAM_BOT_TOKEN` | Ya | Token bot dari BotFather. |
-| `TELEGRAM_NOTIF_CHAT_ID` | Ya untuk notifier | ID chat/grup/channel tujuan broadcast alert Kediri. |
+| `TELEGRAM_NOTIF_CHAT_ID` | Ya | ID chat/grup/channel tujuan broadcast alert Kediri. Pastikan bot dapat mengirim pesan ke tujuan tersebut. |
 | `AI_PROVIDER` | Tidak | Provider AI: `gemini` (default) atau `openai-compatible`. |
 | `GEMINI_API_KEY` | Jika Gemini dipilih | API key Google Gemini. Model yang digunakan `gemini-2.5-flash`. |
 | `OPENAI_COMPATIBLE_BASE_URL` | Jika OpenAI-compatible dipilih | Base URL API, misalnya `https://api.provider.example/v1`. Aplikasi menambahkan `/chat/completions`. |
@@ -80,6 +86,12 @@ CRON_SCHEDULE=*/10 * * * *
 
 Nilai URL dan model di contoh hanya placeholder. Gunakan base URL dan ID model persis dari dokumentasi provider yang dipilih. Saat menggunakan OpenAI-compatible, `GEMINI_API_KEY` tidak diperlukan. `TELEGRAM_NOTIF_CHAT_ID` perlu diisi karena aplikasi menginisialisasi notifier saat startup.
 
+Setelah menyimpan `.env`, pastikan file tidak masuk ke Git:
+
+```bash
+git check-ignore .env
+```
+
 ## Menjalankan dan memeriksa
 
 Mode pengembangan dengan restart saat kode berubah:
@@ -100,12 +112,27 @@ Pemeriksaan TypeScript:
 bun run typecheck
 ```
 
+## Perintah Telegram
+
+- `/start` atau `/help` — tampilkan bantuan dan keyboard interaktif.
+- `/cuaca` — prakiraan BMKG hari ini per 3 jam untuk lokasi aktif. Bagikan GPS terlebih dahulu jika kode desa/kelurahan belum tersedia.
+- `/gempa` — informasi gempa terkini yang dirasakan.
+- `/alert` — periksa alert dini BMKG untuk wilayah aktif. Tidak adanya alert bukan berarti tidak ada hujan.
+- `/lokasi` — lihat lokasi aktif dan cara memperbaruinya dengan GPS.
+- Pesan teks biasa — ajukan pertanyaan cuaca kepada asisten AI dengan konteks prakiraan dan alert.
+
+Daftar command didaftarkan ke menu Telegram default dan bahasa Indonesia saat aplikasi mulai. Jika menu lama masih terlihat, pastikan proses terbaru berhasil start dan periksa log pendaftaran; lalu tutup/buka kembali chat bot atau ketik `/` untuk memuat ulang daftar.
+
+Untuk prakiraan yang tepat, pengguna perlu mengirim lokasi menggunakan tombol **📍 Bagikan Lokasi Saya**. Bot memetakan titik GPS sampai ADM4 menggunakan Nominatim dan `wilayah.id`; prakiraan BMKG resmi memerlukan kode desa/kelurahan. Pengguna lama yang belum memiliki ADM4 perlu membagikan lokasi kembali. Jika GPS tidak dapat dipetakan, bot menampilkan error dan tidak membuat kode wilayah berdasarkan tebakan.
+
 Server monitoring tersedia di:
 
 - `http://localhost:3000/` — nama aplikasi dan status.
 - `http://localhost:3000/health` — status health dan waktu pemeriksaan.
 
-Ganti port pada URL jika `PORT` diatur ke nilai lain. Database `data.sqlite` dibuat otomatis di working directory aplikasi pada penggunaan pertama.
+Ganti port pada URL jika `PORT` diatur ke nilai lain. Database `data.sqlite` dibuat otomatis di working directory aplikasi pada penggunaan pertama. Berkas database dan berkas SQLite terkait diabaikan Git melalui `.gitignore`; data lokal tidak ikut tersimpan di repository. Buat backup database secara terpisah jika perlu mempertahankan data pengguna saat memindahkan server atau melakukan pemulihan.
+
+Skema pengguna lama dimigrasikan otomatis dengan menambahkan kolom kode ADM4. Pengguna lama perlu membagikan lokasi GPS sekali lagi agar kode itu tersimpan dan prakiraan harian dapat diambil.
 
 ## Menjalankan 24/7 di Ubuntu VPS dengan PM2
 
@@ -143,7 +170,7 @@ Isi `.env` sesuai bagian [Konfigurasi environment](#konfigurasi-environment). Pa
 
 ### 3. Konfigurasi PM2 ecosystem
 
-File `ecosystem.config.cjs` sudah tersedia di root repository. File ini menjalankan executable Bun secara langsung (`bun run src/index.ts`) tanpa wrapper interpreter PM2, memakai direktori proyek sebagai `cwd`, dan mengaktifkan restart otomatis jika proses berhenti.
+File `ecosystem.config.cjs` sudah tersedia di root repository. File ini menjalankan executable Bun secara langsung dengan argumen `run src/index.ts` (tanpa wrapper interpreter Bun PM2), memakai direktori proyek sebagai `cwd`, dan mengaktifkan restart otomatis jika proses berhenti. Nama proses PM2 yang didaftarkan file ini adalah `bmkg-bot`.
 
 Secara default konfigurasi mengharapkan Bun pada `~/.bun/bin/bun`. Jika `command -v bun` menunjukkan lokasi berbeda, jalankan PM2 dengan `BUN_BIN`:
 
@@ -162,7 +189,7 @@ Periksa status dan log:
 
 ```bash
 pm2 status
-pm2 logs bmkg-kediri-bot
+pm2 logs bmkg-bot
 ```
 
 ### 4. Aktifkan start otomatis setelah reboot
@@ -184,9 +211,9 @@ PM2 akan memulihkan proses yang disimpan setelah reboot dan me-restart bot jika 
 Perintah operasional:
 
 ```bash
-pm2 restart bmkg-kediri-bot
-pm2 stop bmkg-kediri-bot
-pm2 logs bmkg-kediri-bot
+pm2 restart bmkg-bot
+pm2 stop bmkg-bot
+pm2 logs bmkg-bot
 pm2 status
 ```
 
@@ -196,7 +223,14 @@ Setelah deploy versi baru, dari direktori proyek:
 git pull
 bun install
 bun run typecheck
-pm2 restart ecosystem.config.cjs --update-env
+pm2 restart bmkg-bot --update-env
+pm2 save
+```
+
+Jika mengubah konfigurasi atau path Bun di `ecosystem.config.cjs`, jalankan ulang konfigurasi ecosystem:
+
+```bash
+BUN_BIN="$(command -v bun)" pm2 startOrRestart ecosystem.config.cjs --update-env
 pm2 save
 ```
 

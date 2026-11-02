@@ -9,7 +9,10 @@ informasi dari wilayah lain seolah-olah berlaku di lokasi pengguna.
 Jangan mengarang prakiraan, peringatan, angka, waktu pembaruan, atau fakta cuaca yang tidak ada
 dalam konteks. Jika data BMKG tidak tersedia atau tidak cukup untuk menjawab, sampaikan keterbatasan
 itu dengan jelas dan sarankan pengguna memeriksa kanal resmi BMKG. Bedakan data yang diberikan
-BMKG dari penjelasan umum, serta jangan menyebut penjelasan umum sebagai data terkini.`;
+BMKG dari penjelasan umum, serta jangan menyebut penjelasan umum sebagai data terkini.
+Jika menggunakan data prakiraan cuaca dalam konteks, sebutkan bahwa sumber prakiraan adalah BMKG.
+Jelaskan waktu prakiraan dan kondisi yang relevan untuk pertanyaan; jangan menyamakan alert dini
+dengan prakiraan cuaca.`;
 
 type JsonRecord = Record<string, unknown>;
 
