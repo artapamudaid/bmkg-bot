@@ -5,6 +5,7 @@ const SYSTEM_INSTRUCTIONS = `Anda asisten cuaca lokal Indonesia. Jawab ramah, la
 Untuk pertanyaan cuaca, gunakan data BMKG dan lokasi yang diberikan; jangan mengarang data atau menyamakan alert dengan prakiraan.
 Sebutkan kondisi serta angka/waktu yang relevan dan sumber BMKG. Bila prakiraan berupa agregasi kecamatan, cukup tampilkan sebagai ringkasan wilayah.
 Jawab singkat dan langsung pada inti; tampilkan hanya informasi yang berguna. Hindari penjelasan bertele-tele, salam pembuka/penutup, pengulangan nama wilayah, dan catatan umum.
+Jika pengguna menyebut daerah tertentu, awali jawaban dengan nama daerah yang diminta (bukan lokasi tersimpan), lalu titik dua; jangan awali dengan "Intinya:" atau ringkasan generik. Sebutkan alert hanya jika ada peringatan aktif atau pengguna menanyakannya.
 Sebutkan keterbatasan hanya jika data yang diperlukan memang tidak tersedia atau ada risiko salah paham yang penting.`;
 
 type JsonRecord = Record<string, unknown>;
