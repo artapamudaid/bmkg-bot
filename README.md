@@ -115,11 +115,11 @@ bun run typecheck
 ## Perintah Telegram
 
 - `/start` atau `/help` — tampilkan bantuan dan keyboard interaktif.
-- `/cuaca` — prakiraan BMKG hari ini per 3 jam untuk lokasi aktif. Bagikan GPS terlebih dahulu jika kode desa/kelurahan belum tersedia.
+- `/cuaca` — prakiraan BMKG hari ini per 3 jam untuk lokasi aktif. Tambahkan nama kecamatan dan kabupaten untuk lokasi lain, misalnya `/cuaca Ngadiluwih kab. Kediri`.
 - `/gempa` — informasi gempa terkini yang dirasakan.
 - `/alert` — periksa alert dini BMKG untuk wilayah aktif. Tidak adanya alert bukan berarti tidak ada hujan.
 - `/lokasi` — lihat lokasi aktif dan cara memperbaruinya dengan GPS.
-- Pesan teks biasa — ajukan pertanyaan cuaca kepada asisten AI dengan konteks prakiraan dan alert.
+- Pesan teks biasa — ajukan pertanyaan cuaca kepada asisten AI dengan konteks prakiraan dan alert. Jika pertanyaan menyebut kecamatan (contoh: “cuaca daerah Ngadiluwih kab. Kediri”), bot mencari wilayah itu dan memakai agregasi prakiraan BMKG desa-desa di kecamatan tersebut, bukan lokasi GPS yang tersimpan.
 
 Daftar command didaftarkan ke menu Telegram default dan bahasa Indonesia saat aplikasi mulai. Jika menu lama masih terlihat, pastikan proses terbaru berhasil start dan periksa log pendaftaran; lalu tutup/buka kembali chat bot atau ketik `/` untuk memuat ulang daftar.
 

@@ -6,10 +6,13 @@ import { dbManager } from './db.ts';
 import { askGeminiDynamic } from './services/ai.ts';
 import {
   fetchGempaTerkini,
+  fetchPrakiraanCuacaKecamatan,
   fetchPrakiraanCuacaHariIni,
   fetchWilayahAlerts,
 } from './services/bmkg.ts';
 import {
+  type GeocodedDistrict,
+  resolveDistrictQuery,
   resolveAdm4Code,
   reverseGeocodeDetailed,
 } from './services/geocoding.ts';
@@ -47,6 +50,20 @@ const sendErrorReply = async (
   }
 };
 
+const getRequestErrorMessage = (error: unknown): string => {
+  const details = error instanceof Error ? error.message : String(error);
+  if (/terpotong karena mencapai batas token keluaran/i.test(details)) {
+    return 'Jawaban cuaca belum lengkap karena batas keluaran AI tercapai. Coba tanyakan lagi dengan pertanyaan yang lebih spesifik.';
+  }
+  if (/429|quota|rate.?limit|resource_exhausted/i.test(details)) {
+    return 'Layanan AI sedang mencapai batas penggunaan. Coba lagi nanti atau periksa kuota provider AI.';
+  }
+  if (/401|403|api.?key|unauthorized|permission denied/i.test(details)) {
+    return 'Akses API AI bermasalah. Periksa API key dan konfigurasi provider di server.';
+  }
+  return 'Maaf, permintaan belum dapat diproses. Silakan coba lagi beberapa saat.';
+};
+
 const withTypingIndicator = async <T>(
   chatId: TelegramBot.ChatId,
   operation: () => Promise<T>,
@@ -73,7 +90,8 @@ const sendHelp = async (chatId: number): Promise<void> => {
     chatId,
     [
       'Perintah yang tersedia:',
-      '/cuaca — prakiraan BMKG hari ini per 3 jam.',
+      '/cuaca — prakiraan BMKG hari ini di lokasi aktif.',
+      '/cuaca <kecamatan, kabupaten> — prakiraan kecamatan yang disebut.',
       '/gempa — informasi gempa terkini yang dirasakan.',
       '/alert — cek peringatan dini BMKG untuk lokasi aktif.',
       '/lokasi — lihat lokasi aktif; bagikan GPS untuk memperbaruinya.',
@@ -86,9 +104,93 @@ const sendHelp = async (chatId: number): Promise<void> => {
   );
 };
 
+const editDistance = (left: string, right: string): number => {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    let diagonal = previous[0]!;
+    previous[0] = leftIndex;
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const oldValue = previous[rightIndex]!;
+      previous[rightIndex] = Math.min(
+        previous[rightIndex]! + 1,
+        previous[rightIndex - 1]! + 1,
+        diagonal + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+      diagonal = oldValue;
+    }
+  }
+  return previous[right.length]!;
+};
+
+const correctWeatherKeywords = (text: string): string => {
+  const keywords = ['cuaca', 'prakiraan', 'daerah', 'wilayah', 'kecamatan'];
+  return text.replace(/\b[\p{L}]+\b/gu, (word) => {
+    const normalizedWord = word.toLocaleLowerCase('id-ID');
+    const correction = keywords.find(
+      (keyword) =>
+        Math.abs(keyword.length - normalizedWord.length) <= 1 &&
+        editDistance(normalizedWord, keyword) === 1,
+    );
+    return correction ?? word;
+  });
+};
+
+const extractRequestedDistrict = (text: string): string | undefined => {
+  const correctedText = correctWeatherKeywords(text);
+  const suffix = String.raw`(?=\s+(?:hari\s+ini|sekarang|besok|nanti|bagaimana|gimana|ya|dong|sih)\b|[?!]|$)`;
+  const match =
+    new RegExp(
+      String.raw`\b(?:daerah|wilayah|kecamatan|kec\.?)\s+(.+?)${suffix}`,
+      'i',
+    ).exec(correctedText) ??
+    new RegExp(
+      String.raw`\b(?:cuaca|prakiraan)\s+(?:di|untuk)\s+(.+?)${suffix}`,
+      'i',
+    ).exec(correctedText);
+  const location = match?.[1]?.replace(/[.,!?]+$/g, '').trim();
+  if (location && !/^(saya|aku|sini|situ|ini|itu)$/i.test(location)) {
+    return location;
+  }
+
+  const shortLocation = correctedText.trim();
+  const words = shortLocation.split(/\s+/);
+  const commonChatWords =
+    /\b(?:apa|kabar|terima|kasih|makasih|halo|hai|tolong|bantu|kamu|saya|aku|anda|yang|dan|atau|ini|itu|bagaimana|gimana|berapa|apakah)\b/i;
+  if (
+    words.length >= 2 &&
+    words.length <= 5 &&
+    !/[?!]/.test(shortLocation) &&
+    !commonChatWords.test(shortLocation)
+  ) {
+    return shortLocation;
+  }
+  return undefined;
+};
+
+const getDistrictWeatherContext = async (
+  district: GeocodedDistrict,
+): Promise<{ location: string; context: string }> => {
+  const location = `Kecamatan ${district.district}, ${district.regency}`;
+  const [forecast, alerts] = await Promise.all([
+    fetchPrakiraanCuacaKecamatan(
+      district.district,
+      district.regency,
+      district.villages,
+    ),
+    fetchWilayahAlerts(district.district),
+  ]);
+  const alertContext =
+    alerts.length > 0
+      ? `Alert BMKG untuk ${location}:\n${JSON.stringify(alerts, null, 2)}`
+      : `Tidak ditemukan alert BMKG untuk ${location}. Tidak adanya alert bukan berarti tidak ada hujan.`;
+
+  return { location, context: `${forecast}\n\n${alertContext}` };
+};
+
 const handleCommand = async (
   chatId: number,
   command: string,
+  argument = '',
 ): Promise<boolean> => {
   switch (command.toLowerCase()) {
     case '/start':
@@ -96,6 +198,13 @@ const handleCommand = async (
       await sendHelp(chatId);
       return true;
     case '/cuaca': {
+      if (argument) {
+        const district = await resolveDistrictQuery(argument);
+        const { context } = await getDistrictWeatherContext(district);
+        await bot.sendMessage(chatId, `${context}`);
+        return true;
+      }
+
       const { city, adm4Code } = dbManager.getUserLocationDetails(chatId);
       if (!adm4Code) {
         await bot.sendMessage(
@@ -171,11 +280,13 @@ const handleMessage = async (message: TelegramBot.Message): Promise<void> => {
     if (!text) return;
 
     if (text.startsWith('/')) {
-      const command = text.split(/\s/, 1)[0]!.split('@', 1)[0]!;
+      const [rawCommand, ...argumentParts] = text.split(/\s+/);
+      const command = rawCommand!.split('@', 1)[0]!;
+      const argument = argumentParts.join(' ').trim();
       const needsTyping = ['/cuaca', '/gempa', '/alert'].includes(command.toLowerCase());
       const handled = needsTyping
-        ? await withTypingIndicator(chatId, () => handleCommand(chatId, command))
-        : await handleCommand(chatId, command);
+        ? await withTypingIndicator(chatId, () => handleCommand(chatId, command, argument))
+        : await handleCommand(chatId, command, argument);
       if (!handled) {
         await bot.sendMessage(chatId, 'Perintah tidak dikenal. Gunakan /help untuk melihat daftar perintah.');
       }
@@ -192,6 +303,29 @@ const handleMessage = async (message: TelegramBot.Message): Promise<void> => {
     }
 
     await withTypingIndicator(chatId, async () => {
+      const requestedDistrict = extractRequestedDistrict(text);
+      if (requestedDistrict) {
+        let district: GeocodedDistrict;
+        try {
+          district = await resolveDistrictQuery(requestedDistrict);
+        } catch (error) {
+          console.error(
+            `Gagal mencari prakiraan untuk wilayah yang diminta (${requestedDistrict}):`,
+            error,
+          );
+          await bot.sendMessage(
+            chatId,
+            `Maaf, saya belum dapat menemukan data BMKG untuk "${requestedDistrict}". Coba sebutkan kecamatan dan kabupaten, misalnya: "cuaca daerah Ngadiluwih kab. Kediri".`,
+          );
+          return;
+        }
+
+        const { location, context } = await getDistrictWeatherContext(district);
+        const answer = await askGeminiDynamic(text, location, context);
+        await bot.sendMessage(chatId, answer);
+        return;
+      }
+
       const { city: userLocation, adm4Code } =
         dbManager.getUserLocationDetails(chatId);
       const alerts = await fetchWilayahAlerts(userLocation);
@@ -209,7 +343,7 @@ const handleMessage = async (message: TelegramBot.Message): Promise<void> => {
   } catch (error) {
     await sendErrorReply(
       chatId,
-      'Maaf, permintaan belum dapat diproses. Silakan coba lagi beberapa saat.',
+      getRequestErrorMessage(error),
       `Telegram message handler: ${error instanceof Error ? error.message : String(error)}`,
     );
   }

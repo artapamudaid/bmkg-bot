@@ -13,6 +13,7 @@ type ForecastCacheEntry = {
 };
 
 const forecastCache = new Map<string, ForecastCacheEntry>();
+const districtForecastCache = new Map<string, ForecastCacheEntry>();
 
 const isRecord = (value: unknown): value is JsonRecord =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -134,6 +135,181 @@ const formatForecastEntry = (forecast: JsonRecord): string => {
 
   return `- ${time}: ${details.join('; ')}`;
 };
+
+const getNumericValue = (record: JsonRecord, key: string): number | undefined => {
+  const value = record[key];
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return undefined;
+};
+
+const formatRange = (values: number[], suffix: string): string | undefined => {
+  if (values.length === 0) return undefined;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  return min === max ? `${min}${suffix}` : `${min}–${max}${suffix}`;
+};
+
+async function loadDistrictForecast(
+  districtName: string,
+  regencyName: string,
+  villages: Array<{ code: string; name: string }>,
+): Promise<string> {
+  if (villages.length === 0) {
+    throw new Error(`Data desa/kelurahan untuk Kecamatan ${districtName} tidak tersedia.`);
+  }
+
+  const villageForecasts: Array<{
+    village: string;
+    entries: JsonRecord[];
+    timezone: string;
+  }> = [];
+  const batchSize = 5;
+
+  for (let offset = 0; offset < villages.length; offset += batchSize) {
+    const batch = villages.slice(offset, offset + batchSize);
+    const responses = await Promise.all(
+      batch.map(async (village) => {
+        const { data } = await axios.get<unknown>(FORECAST_URL, {
+          params: { adm4: village.code },
+          headers: { Accept: 'application/json' },
+          timeout: 10_000,
+        });
+
+        if (
+          !isRecord(data) ||
+          !isRecord(data['lokasi']) ||
+          !Array.isArray(data['data'])
+        ) {
+          throw new Error(
+            `Format prakiraan BMKG untuk desa ${village.name} tidak dikenali.`,
+          );
+        }
+
+        const forecastRecords: JsonRecord[] = [];
+        for (const dayData of data['data']) {
+          if (!isRecord(dayData) || !Array.isArray(dayData['cuaca'])) continue;
+          for (const forecastGroup of dayData['cuaca']) {
+            if (!Array.isArray(forecastGroup)) continue;
+            for (const forecast of forecastGroup) {
+              if (isRecord(forecast)) forecastRecords.push(forecast);
+            }
+          }
+        }
+        return {
+          village: village.name,
+          entries: forecastRecords,
+          timezone: getText(data['lokasi'], 'timezone') ?? 'Asia/Jakarta',
+        };
+      }),
+    );
+    villageForecasts.push(...responses);
+  }
+
+  const timezone = villageForecasts[0]?.timezone ?? 'Asia/Jakarta';
+  const today = getTodayInTimezone(timezone);
+  const entriesByTime = new Map<
+    string,
+    Array<{ village: string; forecast: JsonRecord }>
+  >();
+
+  for (const { village, entries } of villageForecasts) {
+    for (const forecast of entries) {
+      const localDateTime = getText(forecast, 'local_datetime');
+      if (!localDateTime?.startsWith(today)) continue;
+      const time = localDateTime.match(/\s(\d{2}:\d{2}):\d{2}$/)?.[1];
+      if (!time) continue;
+      const timeEntries = entriesByTime.get(time) ?? [];
+      timeEntries.push({ village, forecast });
+      entriesByTime.set(time, timeEntries);
+    }
+  }
+
+  if (entriesByTime.size === 0) {
+    throw new Error(
+      `Data prakiraan BMKG untuk Kecamatan ${districtName} hari ini (${today}) belum tersedia.`,
+    );
+  }
+
+  const lines = [...entriesByTime.entries()]
+    .sort(([timeA], [timeB]) => timeA.localeCompare(timeB))
+    .map(([time, entries]) => {
+      const weatherCounts = new Map<string, number>();
+      for (const { forecast } of entries) {
+        const weather = getText(forecast, 'weather_desc');
+        if (weather) weatherCounts.set(weather, (weatherCounts.get(weather) ?? 0) + 1);
+      }
+      const dominantWeather = [...weatherCounts.entries()].sort(
+        ([, countA], [, countB]) => countB - countA,
+      )[0];
+      const temperatures = entries.flatMap(({ forecast }) => {
+        const value = getNumericValue(forecast, 't');
+        return value === undefined ? [] : [value];
+      });
+      const rain = entries.flatMap(({ forecast }) => {
+        const value = getNumericValue(forecast, 'tp');
+        return value === undefined ? [] : [value];
+      });
+      const humidity = entries.flatMap(({ forecast }) => {
+        const value = getNumericValue(forecast, 'hu');
+        return value === undefined ? [] : [value];
+      });
+
+      return [
+        `- ${time}: ${dominantWeather?.[0] ?? 'kondisi tidak tersedia'}`,
+        formatRange(temperatures, '°C') && `suhu ${formatRange(temperatures, '°C')}`,
+        formatRange(rain, ' mm') && `curah hujan ${formatRange(rain, ' mm')}`,
+        formatRange(humidity, '%') && `kelembapan ${formatRange(humidity, '%')}`,
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join('; ');
+    });
+
+  return [
+    'Sumber: BMKG — agregasi prakiraan per 3 jam untuk desa/kelurahan di kecamatan ini.',
+    `Wilayah: Kecamatan ${districtName}, ${regencyName}.`,
+    `Tanggal prakiraan lokal: ${today} (${timezone}).`,
+    `Cakupan: ${villageForecasts.length} desa/kelurahan.`,
+    'Suhu, curah hujan, dan kelembapan ditampilkan sebagai rentang untuk wilayah kecamatan.',
+    ...lines,
+  ].join('\n');
+}
+
+export async function fetchPrakiraanCuacaKecamatan(
+  districtName: string,
+  regencyName: string,
+  villages: Array<{ code: string; name: string }>,
+): Promise<string> {
+  const cacheKey = villages
+    .map(({ code }) => code)
+    .sort()
+    .join(',');
+  if (!cacheKey) {
+    throw new RangeError('Daftar desa ADM4 untuk kecamatan tidak boleh kosong.');
+  }
+
+  const cached = districtForecastCache.get(cacheKey);
+  const cachedDate = cached?.value.match(
+    /Tanggal prakiraan lokal: (\d{4}-\d{2}-\d{2}) \(([^)]+)\)\./,
+  );
+  if (
+    cached &&
+    cached.expiresAt > Date.now() &&
+    cachedDate &&
+    getTodayInTimezone(cachedDate[2]!) === cachedDate[1]
+  ) {
+    return cached.value;
+  }
+
+  const value = await loadDistrictForecast(districtName, regencyName, villages);
+  districtForecastCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + 10 * 60_000,
+  });
+  return value;
+}
 
 async function loadTodayForecast(adm4Code: string): Promise<string> {
   const { data } = await axios.get<unknown>(FORECAST_URL, {

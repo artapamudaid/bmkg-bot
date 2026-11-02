@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 const NOMINATIM_REVERSE_URL = 'https://nominatim.openstreetmap.org/reverse';
+const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search';
 const NOMINATIM_USER_AGENT = 'bmkg-kediri-bot/1.0';
 const WILAYAH_API_URL = 'https://wilayah.id/api';
 
@@ -18,6 +19,13 @@ export type GeocodedLocation = {
   district: string;
   districtCandidates: string[];
   village: string;
+};
+
+export type GeocodedDistrict = {
+  district: string;
+  regency: string;
+  province: string;
+  villages: AdministrativeArea[];
 };
 
 const isRecord = (value: unknown): value is JsonRecord =>
@@ -169,11 +177,216 @@ const findArea = (
   areas: AdministrativeArea[],
   name: string,
 ): AdministrativeArea | undefined => {
+  const exactName = name.trim().toLocaleLowerCase('id-ID');
+  const exactMatch = areas.find(
+    (area) => area.name.trim().toLocaleLowerCase('id-ID') === exactName,
+  );
+  if (exactMatch) return exactMatch;
+
   const normalizedName = normalizeAdministrativeName(name);
   return areas.find(
     (area) => normalizeAdministrativeName(area.name) === normalizedName,
   );
 };
+
+const editDistance = (left: string, right: string): number => {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    let diagonal = previous[0]!;
+    previous[0] = leftIndex;
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const oldValue = previous[rightIndex]!;
+      previous[rightIndex] = Math.min(
+        previous[rightIndex]! + 1,
+        previous[rightIndex - 1]! + 1,
+        diagonal + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+      diagonal = oldValue;
+    }
+  }
+  return previous[right.length]!;
+};
+
+const findDistrictFromQuery = (
+  districts: AdministrativeArea[],
+  query: string,
+  regencyName: string,
+): AdministrativeArea | undefined => {
+  const normalizedQuery = normalizeAdministrativeName(query);
+  const regencyTokens = new Set(
+    normalizeAdministrativeName(regencyName).match(/[a-z]+/g) ?? [],
+  );
+  const queryTokens = (query.toLocaleLowerCase('id-ID').match(/[a-z]+/g) ?? [])
+    .map(normalizeAdministrativeName)
+    .filter(
+      (token) =>
+        token.length > 2 &&
+        !regencyTokens.has(token) &&
+        !isGenericAdministrativeName(token),
+    );
+
+  const exactMatch = districts.find((district) => {
+    if (isGenericAdministrativeName(district.name)) return false;
+    const normalizedDistrict = normalizeAdministrativeName(district.name);
+    return normalizedQuery.includes(normalizedDistrict) ||
+      queryTokens.includes(normalizedDistrict);
+  });
+  if (exactMatch) return exactMatch;
+
+  let closest: AdministrativeArea | undefined;
+  let closestDistance = 2;
+  for (const token of queryTokens) {
+    for (const district of districts) {
+      if (isGenericAdministrativeName(district.name)) continue;
+      const normalizedDistrict = normalizeAdministrativeName(district.name);
+      if (Math.abs(normalizedDistrict.length - token.length) > 1) continue;
+      const distance = editDistance(token, normalizedDistrict);
+      if (distance < closestDistance) {
+        closest = district;
+        closestDistance = distance;
+      }
+    }
+  }
+  return closest;
+};
+
+export async function resolveDistrictQuery(
+  locationQuery: string,
+): Promise<GeocodedDistrict> {
+  const query = locationQuery.trim();
+  if (!query) {
+    throw new RangeError('Nama wilayah tidak boleh kosong.');
+  }
+
+  const searchQuery = query
+    .replace(/\bkab\.?\s+/gi, 'Kabupaten ')
+    .replace(/\bkec\.?\s+/gi, 'Kecamatan ');
+  const provinces = await getAdministrativeAreas('provinces');
+  const searchQueries = [searchQuery];
+  const parentLocation = /\b(?:kota|kabupaten)\s+.+$/i.exec(searchQuery)?.[0];
+  if (parentLocation && normalizeAdministrativeName(parentLocation) !== normalizeAdministrativeName(searchQuery)) {
+    searchQueries.push(parentLocation);
+  }
+
+  for (const [queryIndex, candidateQuery] of searchQueries.entries()) {
+    if (queryIndex > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    }
+
+    const { data } = await axios.get<unknown>(NOMINATIM_SEARCH_URL, {
+      params: {
+        q: `${candidateQuery}, Indonesia`,
+        format: 'jsonv2',
+        addressdetails: 1,
+        countrycodes: 'id',
+        limit: 5,
+      },
+      headers: {
+        Accept: 'application/json',
+        'Accept-Language': 'id',
+        'User-Agent': NOMINATIM_USER_AGENT,
+      },
+      timeout: 10_000,
+    });
+
+    if (!Array.isArray(data)) {
+      throw new Error('Format respons pencarian lokasi Nominatim tidak dikenali.');
+    }
+
+    for (const result of data) {
+      if (!isRecord(result) || !isRecord(result['address'])) continue;
+      const address = result['address'];
+      const provinceName = getAddressValue(address, 'state', 'province');
+      const regencyName = getAddressValue(
+        address,
+        'county',
+        'city',
+        'municipality',
+      );
+      if (!provinceName || !regencyName) continue;
+
+      const province = findArea(provinces, provinceName);
+      if (!province) continue;
+
+      const regencies = await getAdministrativeAreas(`regencies/${province.code}`);
+      const regency = findArea(regencies, regencyName);
+      if (!regency) continue;
+
+      const districts = await getAdministrativeAreas(`districts/${regency.code}`);
+      const districtCandidates = [
+        'district',
+        'city_district',
+        'municipality',
+        'town',
+        'village',
+      ]
+        .map((key) => getAddressValue(address, key))
+        .filter(
+          (name): name is string =>
+            typeof name === 'string' && !isGenericAdministrativeName(name),
+        );
+      const district = districtCandidates
+        .map((candidate) => findArea(districts, candidate))
+        .find((area): area is AdministrativeArea => Boolean(area));
+      const districtFromQuery =
+        district ?? findDistrictFromQuery(districts, query, regency.name);
+      if (districtFromQuery) {
+        const villages = await getAdministrativeAreas(
+          `villages/${districtFromQuery.code}`,
+        );
+        return {
+          district: districtFromQuery.name,
+          regency: regency.name,
+          province: province.name,
+          villages,
+        };
+      }
+
+      const osmVillageNames = [
+        'village',
+        'suburb',
+        'neighbourhood',
+        'hamlet',
+      ]
+        .map((key) => getAddressValue(address, key))
+        .filter((name): name is string => Boolean(name));
+      if (osmVillageNames.length === 0) continue;
+
+      for (let offset = 0; offset < districts.length; offset += 5) {
+        const districtBatch = districts.slice(offset, offset + 5);
+        const villagesByDistrict = await Promise.all(
+          districtBatch.map(async (candidate) => ({
+            district: candidate,
+            villages: await getAdministrativeAreas(
+              `villages/${candidate.code}`,
+            ),
+          })),
+        );
+        const villageMatch = villagesByDistrict.find(({ villages }) =>
+          villages.some((village) =>
+            osmVillageNames.some(
+              (name) =>
+                normalizeAdministrativeName(name) ===
+                normalizeAdministrativeName(village.name),
+            ),
+          ),
+        );
+        if (villageMatch) {
+          return {
+            district: villageMatch.district.name,
+            regency: regency.name,
+            province: province.name,
+            villages: villageMatch.villages,
+          };
+        }
+      }
+    }
+  }
+
+  throw new Error(
+    `Wilayah "${query}" tidak ditemukan atau tidak dapat dipetakan ke kecamatan/desa di Indonesia.`,
+  );
+}
 
 export async function resolveAdm4Code(
   location: GeocodedLocation,

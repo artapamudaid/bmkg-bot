@@ -1,18 +1,11 @@
 import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.ts';
 
-const SYSTEM_INSTRUCTIONS = `Anda adalah asisten cuaca lokal Indonesia yang ramah, luwes, dan membantu.
-Gunakan bahasa Indonesia yang alami dan sesuaikan panjang jawaban dengan pertanyaan pengguna.
-Lokasi aktif pengguna dan konteks data BMKG disertakan pada setiap permintaan. Utamakan informasi BMKG
-untuk lokasi aktif tersebut, jelaskan kondisi atau peringatan yang relevan, dan jangan menyatakan
-informasi dari wilayah lain seolah-olah berlaku di lokasi pengguna.
-Jangan mengarang prakiraan, peringatan, angka, waktu pembaruan, atau fakta cuaca yang tidak ada
-dalam konteks. Jika data BMKG tidak tersedia atau tidak cukup untuk menjawab, sampaikan keterbatasan
-itu dengan jelas dan sarankan pengguna memeriksa kanal resmi BMKG. Bedakan data yang diberikan
-BMKG dari penjelasan umum, serta jangan menyebut penjelasan umum sebagai data terkini.
-Jika menggunakan data prakiraan cuaca dalam konteks, sebutkan bahwa sumber prakiraan adalah BMKG.
-Jelaskan waktu prakiraan dan kondisi yang relevan untuk pertanyaan; jangan menyamakan alert dini
-dengan prakiraan cuaca.`;
+const SYSTEM_INSTRUCTIONS = `Anda asisten cuaca lokal Indonesia. Jawab ramah, langsung, dan ringkas dalam bahasa Indonesia.
+Untuk pertanyaan cuaca, gunakan data BMKG dan lokasi yang diberikan; jangan mengarang data atau menyamakan alert dengan prakiraan.
+Sebutkan kondisi serta angka/waktu yang relevan dan sumber BMKG. Bila prakiraan berupa agregasi kecamatan, cukup tampilkan sebagai ringkasan wilayah.
+Jawab singkat dan langsung pada inti; tampilkan hanya informasi yang berguna. Hindari penjelasan bertele-tele, salam pembuka/penutup, pengulangan nama wilayah, dan catatan umum.
+Sebutkan keterbatasan hanya jika data yang diperlukan memang tidak tersedia atau ada risiko salah paham yang penting.`;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -44,6 +37,10 @@ async function askGemini(prompt: string): Promise<string> {
     },
     contents: prompt,
   });
+
+  if (response.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
+    throw new Error('Jawaban AI terpotong karena mencapai batas token keluaran.');
+  }
 
   const answer = response.text?.trim();
   if (!answer) {
@@ -108,6 +105,9 @@ async function askOpenAICompatible(prompt: string): Promise<string> {
   const firstChoice = payload['choices'][0];
   if (!isRecord(firstChoice) || !isRecord(firstChoice['message'])) {
     throw new Error('Respons provider OpenAI-compatible tidak berisi pesan jawaban.');
+  }
+  if (firstChoice['finish_reason'] === 'length') {
+    throw new Error('Jawaban AI terpotong karena mencapai batas token keluaran.');
   }
 
   const answer = firstChoice['message']['content'];
